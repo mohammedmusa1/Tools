@@ -1,0 +1,196 @@
+import subprocess
+import whois
+import shodan
+import requests
+import socket
+
+# Replace with your actual API keys
+shodan_api_key = "your_shodan_api_key"
+ipinfo_token = "your_ipinfo_token"
+ipapi_token = "your_ipapi_key"
+target_network = "192.168.1.0/24"  # Example target network for Nmap
+
+# Function to get local IP address using socket
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0)
+    try:
+        s.connect(('10.254.254.254', 1))  # Dummy connection to get IP
+        local_ip = s.getsockname()[0]
+    except Exception:
+        local_ip = '127.0.0.1'  # Fallback to localhost if unable to get IP
+    finally:
+        s.close()
+    return local_ip
+
+# Function to run Nmap command to find live IPs on the network
+def run_nmap(target):
+    print(f"Running Nmap scan on network {target}...")
+    result = subprocess.run(['nmap', '-sn', target], capture_output=True, text=True)
+    print(result.stdout)
+
+# Function to use Whois to find domain/IP information
+def run_whois(target_ip):
+    print(f"Running Whois lookup for {target_ip}...")
+    try:
+        domain_info = whois.whois(target_ip)
+        return [domain_info.get('address', '')] if domain_info else []
+    except Exception as e:
+        print(f"Error running Whois: {e}")
+        return []
+
+# Function to use Shodan to search for IP information (requires API key)
+def run_shodan(query=""):
+    print(f"Running Shodan search for {query}...")
+    api = shodan.Shodan(shodan_api_key)
+    try:
+        results = api.search(query)
+        return [result['ip_str'] for result in results['matches']]
+    except shodan.APIError as e:
+        print(f"Error running Shodan: {e}")
+        return []
+
+# Function to use IPinfo API to get information about an IP address (requires API key)
+def run_ipinfo(ip):
+    print(f"Getting information from IPinfo for IP {ip}...")
+    url = f"http://ipinfo.io/{ip}/json?token={ipinfo_token}"
+    response = requests.get(url)
+    data = response.json()
+    return [data.get('ip', '')]
+
+# Function to use GeoIPTool API for IP geolocation (free service)
+def run_geoiptool(ip):
+    print(f"Getting geolocation for IP {ip} using GeoIPTool...")
+    url = f"https://geoiptool.com/en/?ip={ip}"
+    response = requests.get(url)
+    return [ip] if response.status_code == 200 else []
+
+# Function to perform a Masscan to scan open ports on a network (requires Masscan installation)
+def run_masscan(target):
+    print(f"Running Masscan scan on network {target}...")
+    try:
+        result = subprocess.run(['masscan', target, '-p80,443'], capture_output=True, text=True)  # Example scanning for HTTP/HTTPS ports
+        print(result.stdout)
+    except FileNotFoundError:
+        print("Masscan is not installed. Please install Masscan to use this feature.")
+    except Exception as e:
+        print(f"Error running Masscan: {e}")
+
+# Function to perform a traceroute and find the path to an IP
+def run_traceroute(ip):
+    print(f"Running traceroute to {ip}...")
+    result = subprocess.run(['traceroute', ip], capture_output=True, text=True)
+    ip_addresses = []
+    for line in result.stdout.splitlines():
+        if line.strip().startswith("traceroute"):
+            continue
+        parts = line.split()
+        if len(parts) > 1 and is_valid_ip(parts[1]):
+            ip_addresses.append(parts[1])
+    return ip_addresses
+
+# Function to check if an IP is valid
+def is_valid_ip(ip):
+    try:
+        socket.inet_aton(ip)
+        return True
+    except socket.error:
+        return False
+
+# Function to use DNS lookup for getting information about an IP
+def run_dns_lookup(ip):
+    print(f"Running DNS lookup for {ip}...")
+    result = subprocess.run(['dig', '+short', ip], capture_output=True, text=True)
+    return [result.stdout.strip()] if result.stdout.strip() else []
+
+# Function to check IP information using IPAPI (IP Geolocation)
+def run_ipapi(ip):
+    print(f"Getting information from IPAPI for IP {ip}...")
+    url = f"http://api.ipapi.com/{ip}?access_key={ipapi_token}"
+    response = requests.get(url)
+    return [response.json().get('ip', '')]
+
+# Function to find details about public IP using ifconfig.me
+def run_ifconfig_me():
+    print("Getting public IP using ifconfig.me...")
+    response = requests.get("https://ifconfig.me")
+    return [response.text.strip()]
+
+# Main function to use all tools
+def main():
+    # Prompt for target URL/domain or file of targets
+    target_type = input("Enter a URL/domain or 'file' for a list of targets: ").strip().lower()
+
+    if target_type == "url":
+        target_ip = input("Enter a URL/domain for lookup: ").strip()
+        ip_addresses = []
+
+        # Run Whois lookup for the provided target IP/domain
+        ip_addresses.extend(run_whois(target_ip))
+
+        # Run Shodan search (using predefined query)
+        ip_addresses.extend(run_shodan(query=target_ip))
+
+        # Run IPinfo lookup for the provided target IP/domain
+        ip_addresses.extend(run_ipinfo(target_ip))
+
+        # Run GeoIPTool for the provided target IP/domain
+        ip_addresses.extend(run_geoiptool(target_ip))
+
+        # Run Traceroute to the provided target IP/domain
+        ip_addresses.extend(run_traceroute(target_ip))
+
+        # Run DNS lookup for the provided target IP/domain
+        ip_addresses.extend(run_dns_lookup(target_ip))
+
+        # Run IPAPI lookup for the provided target IP/domain
+        ip_addresses.extend(run_ipapi(target_ip))
+
+        # Run public IP lookup using ifconfig.me
+        ip_addresses.extend(run_ifconfig_me())
+
+        # Filter valid IPs
+        valid_ips = list(set([ip for ip in ip_addresses if is_valid_ip(ip)]))
+        print("\nAll valid IPs found:", valid_ips)
+
+    elif target_type == "file":
+        file_path = input("Enter the file path containing list of targets: ").strip()
+        with open(file_path, 'r') as file:
+            targets = file.readlines()
+
+        for target_ip in targets:
+            target_ip = target_ip.strip()
+            print(f"\nProcessing target: {target_ip}")
+
+            ip_addresses = []
+
+            # Run Whois lookup for each target
+            ip_addresses.extend(run_whois(target_ip))
+
+            # Run Shodan search (using predefined query)
+            ip_addresses.extend(run_shodan(query=target_ip))
+
+            # Run IPinfo lookup for each target
+            ip_addresses.extend(run_ipinfo(target_ip))
+
+            # Run GeoIPTool for each target
+            ip_addresses.extend(run_geoiptool(target_ip))
+
+            # Run Traceroute to each target
+            ip_addresses.extend(run_traceroute(target_ip))
+
+            # Run DNS lookup for each target
+            ip_addresses.extend(run_dns_lookup(target_ip))
+
+            # Run IPAPI lookup for each target
+            ip_addresses.extend(run_ipapi(target_ip))
+
+            # Run public IP lookup using ifconfig.me
+            ip_addresses.extend(run_ifconfig_me())
+
+            # Filter valid IPs
+            valid_ips = list(set([ip for ip in ip_addresses if is_valid_ip(ip)]))
+            print("\nValid IPs found for", target_ip, ":", valid_ips)
+
+if __name__ == "__main__":
+    main()
