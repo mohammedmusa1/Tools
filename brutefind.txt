@@ -1,0 +1,192 @@
+sudo tee /usr/local/bin/brutefind > /dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+# Simple brutefind: combines many passive sources + resolves + http probe
+# Spyse and altdns removed per request. Add your API keys below.
+# Usage: brutefind domain.tld
+#        brutefind domain.tld > results.txt
+
+if [[ "${1:-}" == "" ]]; then
+  echo "Usage: $(basename "$0") domain.tld [--no-save] [--aggressive]" >&2
+  exit 1
+fi
+
+TARGET="$1"; shift || true
+NO_SAVE=false
+AGGRESSIVE=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-save) NO_SAVE=true; shift ;;
+    --aggressive) AGGRESSIVE=true; shift ;;
+    -h|--help) echo "Usage: $(basename "$0") domain.tld [--no-save] [--aggressive]" >&2; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+log(){ echo "$@" >&2; }
+
+# -------------------------
+# Put your API keys here (optional)
+# If you don't have keys, leave empty (""), script will skip those APIs.
+VT_API_KEY=""
+ST_API_KEY=""
+SHODAN_API_KEY=""
+# -------------------------
+
+TMP="$(mktemp -d /tmp/brutefind.XXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+ALL="$TMP/all.txt"
+COMB="$TMP/combined.txt"
+RESOLVED="$TMP/resolved.txt"
+HTTP_ALIVE="$TMP/http_alive.txt"
+: > "$ALL"
+
+log "[*] target: $TARGET"
+log "[*] APIs: VT=${VT_API_KEY:+yes} ST=${ST_API_KEY:+yes} SHODAN=${SHODAN_API_KEY:+yes}"
+
+append_if_exists(){ [[ -f "$1" ]] && grep -v '^$' "$1" >> "$ALL" || true; }
+
+# Passive discovery tools (run if present)
+if command -v subfinder >/dev/null 2>&1; then
+  log "[+] subfinder (passive)"
+  subfinder -silent -d "$TARGET" -o "$TMP/subfinder.txt" 2>/dev/null || true
+  append_if_exists "$TMP/subfinder.txt"
+fi
+
+if command -v findomain >/dev/null 2>&1; then
+  log "[+] findomain"
+  findomain -t "$TARGET" -q -o "$TMP/findomain.txt" 2>/dev/null || true
+  append_if_exists "$TMP/findomain.txt"
+fi
+
+if command -v amass >/dev/null 2>&1; then
+  log "[+] amass (passive)"
+  amass enum -passive -d "$TARGET" -o "$TMP/amass_passive.txt" 2>/dev/null || true
+  append_if_exists "$TMP/amass_passive.txt"
+  if $AGGRESSIVE; then
+    log "[+] amass (aggressive)"
+    amass enum -d "$TARGET" -o "$TMP/amass_full.txt" 2>/dev/null || true
+    append_if_exists "$TMP/amass_full.txt"
+  fi
+fi
+
+if command -v assetfinder >/dev/null 2>&1; then
+  log "[+] assetfinder"
+  assetfinder --subs-only "$TARGET" > "$TMP/assetfinder.txt" 2>/dev/null || true
+  append_if_exists "$TMP/assetfinder.txt"
+fi
+
+if command -v sublist3r >/dev/null 2>&1; then
+  log "[+] sublist3r"
+  sublist3r -d "$TARGET" -o "$TMP/sublist3r.txt" 2>/dev/null || true
+  append_if_exists "$TMP/sublist3r.txt"
+elif [[ -f "$HOME/Sublist3r/sublist3r.py" ]]; then
+  log "[+] sublist3r (local clone)"
+  python3 "$HOME/Sublist3r/sublist3r.py" -d "$TARGET" -o "$TMP/sublist3r.txt" 2>/dev/null || true
+  append_if_exists "$TMP/sublist3r.txt"
+fi
+
+if command -v knockpy >/dev/null 2>&1; then
+  log "[+] knockpy"
+  knockpy "$TARGET" -o "$TMP/knockpy_raw.txt" 2>/dev/null || true
+  append_if_exists "$TMP/knockpy_raw.txt"
+elif [[ -f "$HOME/knock/knockpy.py" ]]; then
+  log "[+] knockpy (local clone)"
+  python3 "$HOME/knock/knockpy.py" "$TARGET" -o "$TMP/knockpy_raw.txt" 2>/dev/null || true
+  append_if_exists "$TMP/knockpy_raw.txt"
+fi
+
+# Builtin permutations (small)
+for w in dev test staging www api mail admin portal; do
+  echo "${w}.${TARGET}" >> "$ALL"
+done
+
+# crt.sh (always try)
+log "[+] crt.sh"
+curl -s "https://crt.sh/?q=%25.$TARGET&output=json" | jq -r '.[].name_value' 2>/dev/null \
+  | sed 's/\*\.//g' | tr '\n' '\n' > "$TMP/crtsh.txt" || true
+append_if_exists "$TMP/crtsh.txt"
+
+# HackerTarget (public)
+log "[+] HackerTarget"
+HT="$(curl -s "https://api.hackertarget.com/hostsearch/?q=$TARGET" || true)"
+if [[ -n "$HT" ]]; then
+  echo "$HT" | cut -d',' -f1 | sed '/^$/d' > "$TMP/hackertarget.txt"
+  append_if_exists "$TMP/hackertarget.txt"
+fi
+
+# VirusTotal (optional)
+if [[ -n "${VT_API_KEY:-}" ]]; then
+  log "[+] VirusTotal (first page)"
+  curl -s -H "x-apikey: $VT_API_KEY" \
+    "https://www.virustotal.com/api/v3/domains/$TARGET/subdomains?limit=40" \
+    | jq -r '.data[].id' 2>/dev/null > "$TMP/vt.txt" || true
+  append_if_exists "$TMP/vt.txt"
+fi
+
+# SecurityTrails (optional)
+if [[ -n "${ST_API_KEY:-}" ]]; then
+  log "[+] SecurityTrails"
+  curl -s -H "APIKEY: $ST_API_KEY" \
+    "https://api.securitytrails.com/v1/domain/$TARGET/subdomains?children_only=false" \
+    | jq -r '.subdomains[]' 2>/dev/null | sed "s/\$/.${TARGET}/" > "$TMP/st.txt" || true
+  append_if_exists "$TMP/st.txt"
+fi
+
+# Shodan (optional)
+if [[ -n "${SHODAN_API_KEY:-}" ]]; then
+  log "[+] Shodan"
+  curl -s "https://api.shodan.io/shodan/host/search?key=$SHODAN_API_KEY&query=hostname:$TARGET" \
+    | jq -r '.matches[].hostnames[]' 2>/dev/null > "$TMP/shodan.txt" || true
+  append_if_exists "$TMP/shodan.txt"
+fi
+
+# Normalize & dedupe
+cat "$ALL" 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/ //g' | sed 's/\*\.//g' | sed '/^$/d' | sort -u > "$COMB"
+
+# Resolve with dnsx (if available)
+if command -v dnsx >/dev/null 2>&1; then
+  log "[+] resolving with dnsx"
+  cat "$COMB" | dnsx -silent -a -resp -o "$RESOLVED" 2>/dev/null || true
+  awk '{print $1}' "$RESOLVED" 2>/dev/null | sed -e 's#https\?://##g' -e 's#/.*##g' | sort -u > "$TMP/resolved_hosts.txt" || true
+  if [[ -s "$TMP/resolved_hosts.txt" ]]; then mv "$TMP/resolved_hosts.txt" "$RESOLVED"; fi
+else
+  cp "$COMB" "$RESOLVED"
+fi
+
+# Probe with httpx (if available)
+if command -v httpx >/dev/null 2>&1; then
+  log "[+] probing with httpx"
+  cat "$RESOLVED" | httpx -silent -timeout 10 -status-code -title -o "$HTTP_ALIVE" 2>/dev/null || true
+  awk '{print $1}' "$HTTP_ALIVE" | sed -e 's#https\?://##g' -e 's#/.*##g' | sort -u > "$TMP/http_hosts.txt" || true
+  if [[ -s "$TMP/http_hosts.txt" ]]; then mv "$TMP/http_hosts.txt" "$HTTP_ALIVE"; fi
+else
+  cp "$RESOLVED" "$HTTP_ALIVE"
+fi
+
+FINAL="$TMP/final.txt"
+cat "$HTTP_ALIVE" "$RESOLVED" "$COMB" 2>/dev/null | sort -u > "$FINAL"
+
+# Print final list to stdout (one per line)
+if [[ -s "$FINAL" ]]; then
+  cat "$FINAL"
+else
+  log "[!] No results"
+fi
+
+# Auto-save copy when run interactively (unless --no-save)
+if [ -t 1 ] && ! $NO_SAVE ; then
+  if [[ -d "$HOME/Desktop" ]]; then SAVE_DIR="$HOME/Desktop"; else SAVE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd || pwd)"; fi
+  SAVE_PATH="$SAVE_DIR/brutefind_results_${TARGET//[^a-zA-Z0-9_.-]/_}.txt"
+  cp "$FINAL" "$SAVE_PATH" 2>/dev/null || true
+  log "[*] Saved results to: $SAVE_PATH"
+  if [[ -s "$HTTP_ALIVE" ]]; then AUX="${SAVE_PATH%.txt}_httpx.txt"; cp "$HTTP_ALIVE" "$AUX" 2>/dev/null || true; log "[*] Detailed httpx output: $AUX"; fi
+fi
+
+log "[*] Done."
+EOF
+
+sudo chmod +x /usr/local/bin/brutefind
