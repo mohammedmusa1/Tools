@@ -1,0 +1,40 @@
+Brutefind — quick installer & README
+
+A lightweight single-file recon launcher that aggregates passive subdomain sources, optional API lookups (VirusTotal / SecurityTrails / Shodan), resolves with dnsx, and probes with httpx.
+This README explains the setup, where to add API keys, and the exact install/run command you provided.
+
+Features
+
+Uses installed tools when available: subfinder, amass, findomain, assetfinder, sublist3r, knockpy, dnsx, httpx, jq, curl.
+
+Public lookups: crt.sh, HackerTarget.
+
+Optional API lookups: VirusTotal, SecurityTrails, Shodan (place keys inside the script).
+
+Removes duplicates, normalizes results, resolves DNS and checks HTTP responsiveness (when dnsx / httpx present).
+
+Outputs final domain list on stdout (so brutefind target > file.txt creates a clean file).
+
+Auto-saves a copy to ~/Desktop (when running interactively) unless --no-save is used.
+
+Spyse and altdns removed per request.
+
+Prerequisites
+
+Install the helper tools you want to use. At minimum the script uses curl and jq for public lookups — recommended to install additional tools for best results:
+
+Required (for best experience): curl, jq
+
+Recommended tools (install whichever you want): subfinder, amass, findomain, assetfinder, sublist3r, knockpy, dnsx, httpx
+
+(Optional) API accounts for VirusTotal, SecurityTrails, Shodan if you want additional passive data
+
+On Debian/Ubuntu (example):
+
+sudo apt update
+sudo apt install -y curl jq
+# Install go-based tools (if you use Go):
+# ensure go >= 1.24 for recent ProjectDiscovery tools, or use prebuilt binaries.
+
+
+See each tool's official repo for installation instructions (e.g., go install ..., GitHub releases, or apt packages).
